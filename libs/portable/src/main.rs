@@ -8,9 +8,54 @@ use std::{
 use bin_reader::BinaryReader;
 
 pub mod bin_reader;
+#[cfg(windows)]
+mod ui;
 
+#[cfg(windows)]
+const APP_METADATA: &[u8] = include_bytes!("../app_metadata.toml");
+#[cfg(not(windows))]
+const APP_METADATA: &[u8] = &[];
+const APP_METADATA_CONFIG: &str = "meta.toml";
+const META_LINE_PREFIX_TIMESTAMP: &str = "timestamp = ";
 const APP_PREFIX: &str = "rustdesk";
 const APPNAME_RUNTIME_ENV_KEY: &str = "RUSTDESK_APPNAME";
+
+fn is_timestamp_matches(dir: &PathBuf, ts: &mut u64) -> bool {
+    let Ok(app_metadata) = std::str::from_utf8(APP_METADATA) else {
+        return true;
+    };
+    for line in app_metadata.lines() {
+        if line.starts_with(META_LINE_PREFIX_TIMESTAMP) {
+            if let Ok(stored_ts) = line.replace(META_LINE_PREFIX_TIMESTAMP, "").parse::<u64>() {
+                *ts = stored_ts;
+                break;
+            }
+        }
+    }
+    if *ts == 0 {
+        return true;
+    }
+
+    if let Ok(content) = std::fs::read_to_string(dir.join(APP_METADATA_CONFIG)) {
+        for line in content.lines() {
+            if line.starts_with(META_LINE_PREFIX_TIMESTAMP) {
+                if let Ok(stored_ts) = line.replace(META_LINE_PREFIX_TIMESTAMP, "").parse::<u64>() {
+                    return *ts == stored_ts;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn write_meta(dir: &PathBuf, ts: u64) {
+    let meta_file = dir.join(APP_METADATA_CONFIG);
+    if ts != 0 {
+        let content = format!("{}{}", META_LINE_PREFIX_TIMESTAMP, ts);
+        // Ignore is ok here
+        let _ = std::fs::write(meta_file, content);
+    }
+}
 
 fn setup(reader: BinaryReader, dir: Option<PathBuf>, clear: bool) -> Option<PathBuf> {
     let dir = if let Some(dir) = dir {
@@ -24,12 +69,15 @@ fn setup(reader: BinaryReader, dir: Option<PathBuf>, clear: bool) -> Option<Path
             return None;
         }
     };
-    if clear {
+
+    let mut ts = 0;
+    if clear || !is_timestamp_matches(&dir, &mut ts) {
         std::fs::remove_dir_all(&dir).ok();
     }
     for file in reader.files.iter() {
         file.write_to_file(&dir);
     }
+    write_meta(&dir, ts);
     #[cfg(windows)]
     windows::copy_runtime_broker(&dir);
     #[cfg(linux)]
@@ -54,7 +102,7 @@ fn execute(path: PathBuf, args: Vec<String>) {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .output()
+        .spawn()
         .ok();
 }
 
@@ -72,6 +120,11 @@ fn main() {
     }
     let click_setup = args.is_empty() && arg_exe.to_lowercase().ends_with("install.exe");
     let quick_support = args.is_empty() && arg_exe.to_lowercase().ends_with("qs.exe");
+
+    #[cfg(windows)]
+    if args.is_empty() {
+        ui::setup();
+    }
 
     let reader = BinaryReader::default();
     if let Some(exe) = setup(
@@ -94,11 +147,11 @@ mod windows {
 
     // Used for privacy mode(magnifier impl).
     pub const RUNTIME_BROKER_EXE: &'static str = "C:\\Windows\\System32\\RuntimeBroker.exe";
-    pub const WIN_MAG_INJECTED_PROCESS_EXE: &'static str = "RuntimeBroker_rustdesk.exe";
+    pub const WIN_TOPMOST_INJECTED_PROCESS_EXE: &'static str = "RuntimeBroker_rustdesk.exe";
 
     pub(super) fn copy_runtime_broker(dir: &PathBuf) {
         let src = RUNTIME_BROKER_EXE;
-        let tgt = WIN_MAG_INJECTED_PROCESS_EXE;
+        let tgt = WIN_TOPMOST_INJECTED_PROCESS_EXE;
         let target_file = dir.join(tgt);
         if target_file.exists() {
             if let (Ok(src_file), Ok(tgt_file)) = (fs::read(src), fs::read(&target_file)) {

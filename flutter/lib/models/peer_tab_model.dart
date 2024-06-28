@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
@@ -16,27 +18,44 @@ enum PeerTabIndex {
   group,
 }
 
-const String defaultGroupTabname = 'Group';
-
 class PeerTabModel with ChangeNotifier {
   WeakReference<FFI> parent;
   int get currentTab => _currentTab;
   int _currentTab = 0; // index in tabNames
-  List<String> tabNames = [
-    'Recent Sessions',
+  static const int maxTabCount = 5;
+  static const List<String> tabNames = [
+    'Recent sessions',
     'Favorites',
     'Discovered',
-    'Address Book',
-    //defaultGroupTabname,
+    'Address book',
+    'Group',
   ];
-  final List<IconData> icons = [
+  static const List<IconData> icons = [
     Icons.access_time_filled,
     Icons.star,
     Icons.explore,
     IconFont.addressBook,
     Icons.group,
   ];
-  List<int> get indexs => List.generate(tabNames.length, (index) => index);
+  List<bool> isEnabled = List.from([
+    true,
+    true,
+    !isWeb,
+    !(bind.isDisableAb() || bind.isDisableAccount()),
+    !(bind.isDisableGroupPanel() || bind.isDisableAccount()),
+  ]);
+  final List<bool> _isVisible = List.filled(maxTabCount, true, growable: false);
+  List<bool> get isVisibleEnabled => () {
+        final list = _isVisible.toList();
+        for (int i = 0; i < maxTabCount; i++) {
+          list[i] = list[i] && isEnabled[i];
+        }
+        return list;
+      }();
+  final List<int> orders =
+      List.generate(maxTabCount, (index) => index, growable: false);
+  List<int> get visibleEnabledOrderedIndexs =>
+      orders.where((e) => isVisibleEnabled[e]).toList();
   List<Peer> _selectedPeers = List.empty(growable: true);
   List<Peer> get selectedPeers => _selectedPeers;
   bool _multiSelectionMode = false;
@@ -49,12 +68,53 @@ class PeerTabModel with ChangeNotifier {
   String get lastId => _lastId;
 
   PeerTabModel(this.parent) {
+    // visible
+    try {
+      final option = bind.getLocalFlutterOption(k: kOptionPeerTabVisible);
+      if (option.isNotEmpty) {
+        List<dynamic> decodeList = jsonDecode(option);
+        if (decodeList.length == _isVisible.length) {
+          for (int i = 0; i < _isVisible.length; i++) {
+            if (decodeList[i] is bool) {
+              _isVisible[i] = decodeList[i];
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("failed to get peer tab visible list:$e");
+    }
+    // order
+    try {
+      final option = bind.getLocalFlutterOption(k: kOptionPeerTabOrder);
+      if (option.isNotEmpty) {
+        List<dynamic> decodeList = jsonDecode(option);
+        if (decodeList.length == maxTabCount) {
+          var sortedList = decodeList.toList();
+          sortedList.sort();
+          bool valid = true;
+          for (int i = 0; i < maxTabCount; i++) {
+            if (sortedList[i] is! int || sortedList[i] != i) {
+              valid = false;
+            }
+          }
+          if (valid) {
+            for (int i = 0; i < orders.length; i++) {
+              orders[i] = decodeList[i];
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("failed to get peer tab order list: $e");
+    }
     // init currentTab
     _currentTab =
-        int.tryParse(bind.getLocalFlutterConfig(k: 'peer-tab-index')) ?? 0;
-    if (_currentTab < 0 || _currentTab >= tabNames.length) {
+        int.tryParse(bind.getLocalFlutterOption(k: kOptionPeerTabIndex)) ?? 0;
+    if (_currentTab < 0 || _currentTab >= maxTabCount) {
       _currentTab = 0;
     }
+    _trySetCurrentTabToFirstVisibleEnabled();
   }
 
   setCurrentTab(int index) {
@@ -64,27 +124,17 @@ class PeerTabModel with ChangeNotifier {
     }
   }
 
-  String tabTooltip(int index, String groupName) {
+  String tabTooltip(int index) {
     if (index >= 0 && index < tabNames.length) {
-      if (index == PeerTabIndex.group.index) {
-        if (gFFI.userModel.isAdmin.value || groupName.isEmpty) {
-          return translate(defaultGroupTabname);
-        } else {
-          return '${translate('Group')}: $groupName';
-        }
-      } else {
-        return translate(tabNames[index]);
-      }
+      return translate(tabNames[index]);
     }
-    assert(false);
     return index.toString();
   }
 
   IconData tabIcon(int index) {
-    if (index >= 0 && index < tabNames.length) {
+    if (index >= 0 && index < icons.length) {
       return icons[index];
     }
-    assert(false);
     return Icons.help;
   }
 
@@ -156,6 +206,58 @@ class PeerTabModel with ChangeNotifier {
       if (_multiSelectionMode) {
         notifyListeners();
       }
+    }
+  }
+
+  setTabVisible(int index, bool visible) {
+    if (index >= 0 && index < maxTabCount) {
+      if (_isVisible[index] != visible) {
+        _isVisible[index] = visible;
+        if (index == _currentTab && !visible) {
+          _trySetCurrentTabToFirstVisibleEnabled();
+        } else if (visible && visibleEnabledOrderedIndexs.length == 1) {
+          _currentTab = index;
+        }
+        try {
+          bind.setLocalFlutterOption(
+              k: kOptionPeerTabVisible, v: jsonEncode(_isVisible));
+        } catch (_) {}
+        notifyListeners();
+      }
+    }
+  }
+
+  _trySetCurrentTabToFirstVisibleEnabled() {
+    if (!visibleEnabledOrderedIndexs.contains(_currentTab)) {
+      if (visibleEnabledOrderedIndexs.isNotEmpty) {
+        _currentTab = visibleEnabledOrderedIndexs.first;
+      }
+    }
+  }
+
+  reorder(int oldIndex, int newIndex) {
+    if (oldIndex < newIndex) {
+      newIndex -= 1;
+    }
+    if (oldIndex < 0 || oldIndex >= visibleEnabledOrderedIndexs.length) {
+      return;
+    }
+    if (newIndex < 0 || newIndex >= visibleEnabledOrderedIndexs.length) {
+      return;
+    }
+    final oldTabValue = visibleEnabledOrderedIndexs[oldIndex];
+    final newTabValue = visibleEnabledOrderedIndexs[newIndex];
+    int oldValueIndex = orders.indexOf(oldTabValue);
+    int newValueIndex = orders.indexOf(newTabValue);
+    final list = orders.toList();
+    if (oldIndex != -1 && newIndex != -1) {
+      list.removeAt(oldValueIndex);
+      list.insert(newValueIndex, oldTabValue);
+      for (int i = 0; i < list.length; i++) {
+        orders[i] = list[i];
+      }
+      bind.setLocalFlutterOption(k: kOptionPeerTabOrder, v: jsonEncode(orders));
+      notifyListeners();
     }
   }
 }

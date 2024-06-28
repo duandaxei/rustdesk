@@ -1,3 +1,4 @@
+import 'package:flutter_hbb/common.dart';
 import 'package:get/get.dart';
 
 import '../consts.dart';
@@ -10,7 +11,7 @@ class PrivacyModeState {
   static void init(String id) {
     final key = tag(id);
     if (!Get.isRegistered(tag: key)) {
-      final RxBool state = false.obs;
+      final RxString state = ''.obs;
       Get.put(state, tag: key);
     }
   }
@@ -20,11 +21,11 @@ class PrivacyModeState {
     if (Get.isRegistered(tag: key)) {
       Get.delete(tag: key);
     } else {
-      Get.find<RxBool>(tag: key).value = false;
+      Get.find<RxString>(tag: key).value = '';
     }
   }
 
-  static RxBool find(String id) => Get.find<RxBool>(tag: tag(id));
+  static RxString find(String id) => Get.find<RxString>(tag: tag(id));
 }
 
 class BlockInputState {
@@ -146,6 +147,29 @@ class FingerprintState {
 
 class ShowRemoteCursorState {
   static String tag(String id) => 'show_remote_cursor_$id';
+
+  static void init(String id) {
+    final key = tag(id);
+    if (!Get.isRegistered(tag: key)) {
+      final RxBool state = false.obs;
+      Get.put(state, tag: key);
+    } else {
+      Get.find<RxBool>(tag: key).value = false;
+    }
+  }
+
+  static void delete(String id) {
+    final key = tag(id);
+    if (Get.isRegistered(tag: key)) {
+      Get.delete(tag: key);
+    }
+  }
+
+  static RxBool find(String id) => Get.find<RxBool>(tag: tag(id));
+}
+
+class ShowRemoteCursorLockState {
+  static String tag(String id) => 'show_remote_cursor_lock_$id';
 
   static void init(String id) {
     final key = tag(id);
@@ -314,10 +338,12 @@ initSharedStates(String id) {
   CurrentDisplayState.init(id);
   KeyboardEnabledState.init(id);
   ShowRemoteCursorState.init(id);
+  ShowRemoteCursorLockState.init(id);
   RemoteCursorMovedState.init(id);
   FingerprintState.init(id);
-  PeerBoolOption.init(id, 'zoom-cursor', () => false);
+  PeerBoolOption.init(id, kOptionZoomCursor, () => false);
   UnreadChatCountState.init(id);
+  if (isMobile) ConnectionTypeState.init(id); // desktop in other places
 }
 
 removeSharedStates(String id) {
@@ -325,9 +351,11 @@ removeSharedStates(String id) {
   BlockInputState.delete(id);
   CurrentDisplayState.delete(id);
   ShowRemoteCursorState.delete(id);
+  ShowRemoteCursorLockState.delete(id);
   KeyboardEnabledState.delete(id);
   RemoteCursorMovedState.delete(id);
   FingerprintState.delete(id);
-  PeerBoolOption.delete(id, 'zoom-cursor');
+  PeerBoolOption.delete(id, kOptionZoomCursor);
   UnreadChatCountState.delete(id);
+  if (isMobile) ConnectionTypeState.delete(id);
 }

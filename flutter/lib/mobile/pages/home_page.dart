@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/mobile/pages/server_page.dart';
 import 'package:flutter_hbb/mobile/pages/settings_page.dart';
 import 'package:get/get.dart';
 import '../../common.dart';
 import '../../common/widgets/chat_page.dart';
+import '../../models/platform_model.dart';
 import 'connection_page.dart';
 
 abstract class PageShape extends Widget {
@@ -14,19 +14,22 @@ abstract class PageShape extends Widget {
 }
 
 class HomePage extends StatefulWidget {
-  static final homeKey = GlobalKey<_HomePageState>();
+  static final homeKey = GlobalKey<HomePageState>();
 
   HomePage() : super(key: homeKey);
 
   @override
-  _HomePageState createState() => _HomePageState();
+  HomePageState createState() => HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class HomePageState extends State<HomePage> {
   var _selectedIndex = 0;
   int get selectedIndex => _selectedIndex;
   final List<PageShape> _pages = [];
-  final _blockableOverlayState = BlockableOverlayState();
+  int _chatPageTabIndex = -1;
+  bool get isChatPageCurrentTab => isAndroid
+      ? _selectedIndex == _chatPageTabIndex
+      : false; // change this when ios have chat page
 
   void refreshPages() {
     setState(() {
@@ -38,13 +41,13 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     initPages();
-    _blockableOverlayState.applyFfi(gFFI);
   }
 
   void initPages() {
     _pages.clear();
-    _pages.add(ConnectionPage());
-    if (isAndroid) {
+    if (!bind.isIncomingOnly()) _pages.add(ConnectionPage());
+    if (isAndroid && !bind.isOutgoingOnly()) {
+      _chatPageTabIndex = _pages.length;
       _pages.addAll([ChatPage(type: ChatPageType.mobileMain), ServerPage()]);
     }
     _pages.add(SettingsPage());
@@ -82,13 +85,15 @@ class _HomePageState extends State<HomePage> {
             unselectedItemColor: MyTheme.darkGray,
             onTap: (index) => setState(() {
               // close chat overlay when go chat page
-              if (index == 1 && _selectedIndex != index) {
-                gFFI.chatModel.hideChatIconOverlay();
-                gFFI.chatModel.hideChatWindowOverlay();
-                gFFI.chatModel
-                    .mobileClearClientUnread(gFFI.chatModel.currentKey.connId);
+              if (_selectedIndex != index) {
+                _selectedIndex = index;
+                if (isChatPageCurrentTab) {
+                  gFFI.chatModel.hideChatIconOverlay();
+                  gFFI.chatModel.hideChatWindowOverlay();
+                  gFFI.chatModel.mobileClearClientUnread(
+                      gFFI.chatModel.currentKey.connId);
+                }
               }
-              _selectedIndex = index;
             }),
           ),
           body: _pages.elementAt(_selectedIndex),
@@ -98,7 +103,7 @@ class _HomePageState extends State<HomePage> {
   Widget appTitle() {
     final currentUser = gFFI.chatModel.currentUser;
     final currentKey = gFFI.chatModel.currentKey;
-    if (_selectedIndex == 1 &&
+    if (isChatPageCurrentTab &&
         currentUser != null &&
         currentKey.peerId.isNotEmpty) {
       final connected =
@@ -139,7 +144,7 @@ class _HomePageState extends State<HomePage> {
         ],
       );
     }
-    return Text("RustDesk");
+    return Text(bind.mainGetAppNameSync());
   }
 }
 
@@ -152,7 +157,7 @@ class WebHomePage extends StatelessWidget {
       // backgroundColor: MyTheme.grayBg,
       appBar: AppBar(
         centerTitle: true,
-        title: Text("RustDesk" + (isWeb ? " (Beta) " : "")),
+        title: Text(bind.mainGetAppNameSync()),
         actions: connectionPage.appBarActions,
       ),
       body: connectionPage,

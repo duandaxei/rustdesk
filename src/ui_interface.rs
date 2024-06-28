@@ -2,14 +2,13 @@
 use hbb_common::password_security;
 use hbb_common::{
     allow_err,
-    config::{self, Config, LocalConfig, PeerConfig},
-    directories_next, log, tokio,
-};
-use hbb_common::{
     bytes::Bytes,
-    config::{CONNECT_TIMEOUT, RENDEZVOUS_PORT},
+    config::{self, Config, LocalConfig, PeerConfig, CONNECT_TIMEOUT, RENDEZVOUS_PORT},
+    directories_next,
     futures::future::join_all,
+    log,
     rendezvous_proto::*,
+    tokio,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::{
@@ -17,9 +16,11 @@ use hbb_common::{
     tokio::{sync::mpsc, time},
 };
 use serde_derive::Serialize;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::process::Child;
 use std::{
     collections::HashMap,
-    process::Child,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex},
 };
 
@@ -31,6 +32,7 @@ use crate::ipc;
 
 type Message = RendezvousMessage;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub type Children = Arc<Mutex<(bool, HashMap<(String, String), Child>)>>;
 
 #[derive(Clone, Debug, Serialize)]
@@ -62,8 +64,11 @@ lazy_static::lazy_static! {
         id: "".to_owned(),
     }));
     static ref ASYNC_JOB_STATUS : Arc<Mutex<String>> = Default::default();
+    static ref ASYNC_HTTP_STATUS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref TEMPORARY_PASSWD : Arc<Mutex<String>> = Arc::new(Mutex::new("".to_owned()));
 }
+
+pub static VIDEO_CONN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 lazy_static::lazy_static! {
@@ -128,15 +133,23 @@ pub fn get_license() -> String {
     #[cfg(windows)]
     if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
         #[cfg(feature = "flutter")]
-        return format!("Key: {}\nHost: {}\nApi: {}", lic.key, lic.host, lic.api);
+        return format!("Key: {}\nHost: {}\nAPI: {}", lic.key, lic.host, lic.api);
         // default license format is html formed (sciter)
         #[cfg(not(feature = "flutter"))]
         return format!(
-            "<br /> Key: {} <br /> Host: {} Api: {}",
+            "<br /> Key: {} <br /> Host: {} API: {}",
             lic.key, lic.host, lic.api
         );
     }
     Default::default()
+}
+
+#[inline]
+pub fn refresh_options() {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        *OPTIONS.lock().unwrap() = Config::get_options();
+    }
 }
 
 #[inline]
@@ -157,8 +170,36 @@ pub fn get_option<T: AsRef<str>>(key: T) -> String {
 }
 
 #[inline]
+#[cfg(target_os = "macos")]
+pub fn use_texture_render() -> bool {
+    cfg!(feature = "flutter") && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) == "Y"
+}
+
+#[inline]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn use_texture_render() -> bool {
+    cfg!(feature = "flutter") && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N"
+}
+
+#[inline]
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub fn use_texture_render() -> bool {
+    false
+}
+
+#[inline]
 pub fn get_local_option(key: String) -> String {
     LocalConfig::get_option(&key)
+}
+
+#[inline]
+pub fn get_hard_option(key: String) -> String {
+    config::HARD_SETTINGS
+        .read()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[inline]
@@ -168,14 +209,14 @@ pub fn set_local_option(key: String, value: String) {
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
-pub fn get_local_flutter_config(key: String) -> String {
-    LocalConfig::get_flutter_config(&key)
+pub fn get_local_flutter_option(key: String) -> String {
+    LocalConfig::get_flutter_option(&key)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
-pub fn set_local_flutter_config(key: String, value: String) {
-    LocalConfig::set_flutter_config(key, value);
+pub fn set_local_flutter_option(key: String, value: String) {
+    LocalConfig::set_flutter_option(key, value);
 }
 
 #[cfg(feature = "flutter")]
@@ -210,9 +251,21 @@ pub fn get_peer_option(id: String, name: String) -> String {
 
 #[inline]
 #[cfg(feature = "flutter")]
-pub fn get_peer_flutter_config(id: String, name: String) -> String {
+pub fn get_peer_flutter_option(id: String, name: String) -> String {
     let c = PeerConfig::load(&id);
     c.ui_flutter.get(&name).unwrap_or(&"".to_owned()).to_owned()
+}
+
+#[inline]
+#[cfg(feature = "flutter")]
+pub fn set_peer_flutter_option(id: String, name: String, value: String) {
+    let mut c = PeerConfig::load(&id);
+    if value.is_empty() {
+        c.ui_flutter.remove(&name);
+    } else {
+        c.ui_flutter.insert(name, value);
+    }
+    c.store(&id);
 }
 
 #[inline]
@@ -224,12 +277,6 @@ pub fn set_peer_option(id: String, name: String, value: String) {
         c.options.insert(name, value);
     }
     c.store(&id);
-}
-
-#[inline]
-pub fn using_public_server() -> bool {
-    option_env!("RENDEZVOUS_SERVER").unwrap_or("").is_empty()
-        && crate::get_custom_rendezvous_server(get_option("custom-rendezvous-server")).is_empty()
 }
 
 #[inline]
@@ -252,8 +299,8 @@ pub fn get_options() -> String {
 }
 
 #[inline]
-pub fn test_if_valid_server(host: String) -> String {
-    hbb_common::socket_client::test_if_valid_server(&host)
+pub fn test_if_valid_server(host: String, test_with_proxy: bool) -> String {
+    hbb_common::socket_client::test_if_valid_server(&host, test_with_proxy)
 }
 
 #[inline]
@@ -321,7 +368,7 @@ pub fn set_option(key: String, value: String) {
         #[cfg(target_os = "macos")]
         {
             let is_stop = value == "Y";
-            if is_stop && crate::platform::macos::uninstall_service(true) {
+            if is_stop && crate::platform::uninstall_service(true, false) {
                 return;
             }
         }
@@ -329,7 +376,7 @@ pub fn set_option(key: String, value: String) {
         {
             if crate::platform::is_installed() {
                 if value == "Y" {
-                    if crate::platform::uninstall_service(true) {
+                    if crate::platform::uninstall_service(true, false) {
                         return;
                     }
                 } else {
@@ -340,6 +387,9 @@ pub fn set_option(key: String, value: String) {
                 return;
             }
         }
+    } else if &key == "audio-input" {
+        #[cfg(not(target_os = "ios"))]
+        crate::audio_service::restart();
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -394,6 +444,16 @@ pub fn set_socks(proxy: String, username: String, password: String) {
     .ok();
 }
 
+#[inline]
+pub fn get_proxy_status() -> bool {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return ipc::get_proxy_status();
+
+    // Currently, only the desktop version has proxy settings.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return false;
+}
+
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn set_socks(_: String, _: String, _: String) {}
 
@@ -407,14 +467,6 @@ pub fn is_installed() -> bool {
 #[inline]
 pub fn is_installed() -> bool {
     false
-}
-
-#[inline]
-pub fn is_rdp_service_open() -> bool {
-    #[cfg(windows)]
-    return is_installed() && crate::platform::windows::is_rdp_service_open();
-    #[cfg(not(windows))]
-    return false;
 }
 
 #[inline]
@@ -582,7 +634,13 @@ pub fn current_is_wayland() -> bool {
 
 #[inline]
 pub fn get_new_version() -> String {
-    hbb_common::get_version_from_url(&*SOFTWARE_UPDATE_URL.lock().unwrap())
+    (*SOFTWARE_UPDATE_URL
+        .lock()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap_or(""))
+    .to_string()
 }
 
 #[inline]
@@ -613,6 +671,7 @@ pub fn discover() {
 
 #[cfg(feature = "flutter")]
 pub fn peer_to_map(id: String, p: PeerConfig) -> HashMap<&'static str, String> {
+    use hbb_common::sodiumoxide::base64;
     HashMap::<&str, String>::from_iter([
         ("id", id),
         ("username", p.info.username.clone()),
@@ -622,18 +681,16 @@ pub fn peer_to_map(id: String, p: PeerConfig) -> HashMap<&'static str, String> {
             "alias",
             p.options.get("alias").unwrap_or(&"".to_owned()).to_owned(),
         ),
+        (
+            "hash",
+            base64::encode(p.password, base64::Variant::Original),
+        ),
     ])
 }
 
 #[cfg(feature = "flutter")]
-pub fn peer_to_map_ab(id: String, p: PeerConfig) -> HashMap<&'static str, String> {
-    use hbb_common::sodiumoxide::base64;
-    let mut m = peer_to_map(id, p.clone());
-    m.insert(
-        "hash",
-        base64::encode(p.password, base64::Variant::Original),
-    );
-    m
+pub fn peer_exists(id: &str) -> bool {
+    PeerConfig::exists(id)
 }
 
 #[inline]
@@ -685,6 +742,33 @@ pub fn change_id(id: String) {
 }
 
 #[inline]
+pub fn http_request(url: String, method: String, body: Option<String>, header: String) {
+    // Respond to concurrent requests for resources
+    let current_request = ASYNC_HTTP_STATUS.clone();
+    current_request
+        .lock()
+        .unwrap()
+        .insert(url.clone(), " ".to_owned());
+    std::thread::spawn(move || {
+        let res = match crate::http_request_sync(url.clone(), method, body, header) {
+            Err(err) => {
+                log::error!("{}", err);
+                err.to_string()
+            }
+            Ok(text) => text,
+        };
+        current_request.lock().unwrap().insert(url, res);
+    });
+}
+#[inline]
+pub fn get_async_http_status(url: String) -> Option<String> {
+    match ASYNC_HTTP_STATUS.lock().unwrap().get(&url) {
+        None => None,
+        Some(_str) => Some(_str.to_string()),
+    }
+}
+
+#[inline]
 pub fn post_request(url: String, body: String, header: String) {
     *ASYNC_JOB_STATUS.lock().unwrap() = " ".to_owned();
     std::thread::spawn(move || {
@@ -712,7 +796,7 @@ pub fn get_langs() -> String {
 }
 
 #[inline]
-pub fn default_video_save_directory() -> String {
+pub fn video_save_directory(root: bool) -> String {
     let appname = crate::get_app_name();
     // ui process can show it correctly Once vidoe process created it.
     let try_create = |path: &std::path::Path| {
@@ -726,6 +810,20 @@ pub fn default_video_save_directory() -> String {
         }
     };
 
+    if root {
+        // Currently, only installed windows run as root
+        #[cfg(windows)]
+        {
+            let drive = std::env::var("SystemDrive").unwrap_or("C:".to_owned());
+            let dir =
+                std::path::PathBuf::from(format!("{drive}\\ProgramData\\RustDesk\\recording",));
+            return dir.to_string_lossy().to_string();
+        }
+    }
+    let dir = Config::get_option("video-save-directory");
+    if !dir.is_empty() {
+        return dir;
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Ok(home) = config::APP_HOME_DIR.read() {
         let mut path = home.to_owned();
@@ -792,7 +890,7 @@ pub fn default_video_save_directory() -> String {
             return parent.to_string_lossy().to_string();
         }
     }
-    "".to_owned()
+    Default::default()
 }
 
 #[inline]
@@ -805,17 +903,35 @@ pub fn get_api_server() -> String {
 
 #[inline]
 pub fn has_hwcodec() -> bool {
-    #[cfg(not(any(feature = "hwcodec", feature = "mediacodec")))]
-    return false;
-    #[cfg(any(feature = "hwcodec", feature = "mediacodec"))]
-    return true;
+    // Has real hardware codec using gpu
+    (cfg!(feature = "hwcodec") && (cfg!(windows) || cfg!(target_os = "linux")))
+        || cfg!(feature = "mediacodec")
+}
+
+#[inline]
+pub fn has_vram() -> bool {
+    cfg!(feature = "vram")
 }
 
 #[cfg(feature = "flutter")]
 #[inline]
 pub fn supported_hwdecodings() -> (bool, bool) {
-    let decoding = scrap::codec::Decoder::supported_decodings(None);
-    (decoding.ability_h264 > 0, decoding.ability_h265 > 0)
+    let decoding =
+        scrap::codec::Decoder::supported_decodings(None, use_texture_render(), None, &vec![]);
+    #[allow(unused_mut)]
+    let (mut h264, mut h265) = (decoding.ability_h264 > 0, decoding.ability_h265 > 0);
+    #[cfg(feature = "vram")]
+    {
+        // supported_decodings check runtime luid
+        let vram = scrap::vram::VRamDecoder::possible_available_without_check();
+        if vram.0 {
+            h264 = true;
+        }
+        if vram.1 {
+            h265 = true;
+        }
+    }
+    (h264, h265)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -833,8 +949,6 @@ pub fn is_root() -> bool {
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
 pub fn check_super_user_permission() -> bool {
-    #[cfg(feature = "flatpak")]
-    return true;
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     return crate::platform::check_super_user_permission().unwrap_or(false);
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -962,10 +1076,6 @@ pub fn get_fingerprint() -> String {
     return ipc::get_fingerprint();
 }
 
-pub fn get_hostname() -> String {
-    crate::common::hostname()
-}
-
 #[inline]
 pub fn get_login_device_info() -> LoginDeviceInfo {
     LoginDeviceInfo {
@@ -978,7 +1088,7 @@ pub fn get_login_device_info() -> LoginDeviceInfo {
 
 #[inline]
 pub fn get_login_device_info_json() -> String {
-    serde_json::to_string(&get_login_device_info()).unwrap_or_default()
+    serde_json::to_string(&get_login_device_info()).unwrap_or("{}".to_string())
 }
 
 // notice: avoiding create ipc connection repeatedly,
@@ -992,12 +1102,18 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
     let mut mouse_time = 0;
     #[cfg(not(feature = "flutter"))]
     let mut id = "".to_owned();
-    #[cfg(target_os = "windows")]
+    #[cfg(any(
+        target_os = "windows",
+        all(
+            any(target_os = "linux", target_os = "macos"),
+            feature = "unix-file-copy-paste"
+        )
+    ))]
     let mut enable_file_transfer = "".to_owned();
 
     loop {
         if let Ok(mut c) = ipc::connect(1000, "").await {
-            let mut timer = time::interval(time::Duration::from_secs(1));
+            let mut timer = crate::rustdesk_interval(time::interval(time::Duration::from_secs(1)));
             loop {
                 tokio::select! {
                     res = c.next() => {
@@ -1015,9 +1131,15 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 *OPTIONS.lock().unwrap() = v;
                                 *OPTION_SYNCED.lock().unwrap() = true;
 
-                                #[cfg(target_os="windows")]
+                                #[cfg(any(
+                                        target_os = "windows",
+                                        all(
+                                            any(target_os="linux", target_os = "macos"),
+                                            feature = "unix-file-copy-paste"
+                                            )
+                                        ))]
                                 {
-                                    let b = OPTIONS.lock().unwrap().get("enable-file-transfer").map(|x| x.to_string()).unwrap_or_default();
+                                    let b = OPTIONS.lock().unwrap().get(config::keys::OPTION_ENABLE_FILE_TRANSFER).map(|x| x.to_string()).unwrap_or_default();
                                     if b != enable_file_transfer {
                                         clipboard::ContextSend::enable(b.is_empty());
                                         enable_file_transfer = b;
@@ -1033,6 +1155,9 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 } else if name == "temporary-password" {
                                     *TEMPORARY_PASSWD.lock().unwrap() = value;
                                 }
+                            }
+                            Ok(Some(ipc::Data::VideoConnCount(Some(n)))) => {
+                                VIDEO_CONN_COUNT.store(n, Ordering::Relaxed);
                             }
                             Ok(Some(ipc::Data::OnlineStatus(Some((mut x, _c))))) => {
                                 if x > 0 {
@@ -1063,6 +1188,7 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                         c.send(&ipc::Data::Options(None)).await.ok();
                         c.send(&ipc::Data::Config(("id".to_owned(), None))).await.ok();
                         c.send(&ipc::Data::Config(("temporary-password".to_owned(), None))).await.ok();
+                        c.send(&ipc::Data::VideoConnCount(None)).await.ok();
                     }
                 }
             }
@@ -1234,10 +1360,66 @@ async fn check_id(
 }
 
 // if it's relay id, return id processed, otherwise return original id
-pub fn handle_relay_id(id: String) -> String {
+pub fn handle_relay_id(id: &str) -> &str {
     if id.ends_with(r"\r") || id.ends_with(r"/r") {
-        id[0..id.len() - 2].to_string()
+        &id[0..id.len() - 2]
     } else {
         id
+    }
+}
+
+pub fn support_remove_wallpaper() -> bool {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return crate::platform::WallPaperRemover::support();
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    return false;
+}
+
+pub fn has_valid_2fa() -> bool {
+    let raw = get_option("2fa");
+    crate::auth_2fa::get_2fa(Some(raw)).is_some()
+}
+
+pub fn generate2fa() -> String {
+    crate::auth_2fa::generate2fa()
+}
+
+pub fn verify2fa(code: String) -> bool {
+    let res = crate::auth_2fa::verify2fa(code);
+    if res {
+        refresh_options();
+    }
+    res
+}
+
+pub fn has_valid_bot() -> bool {
+    crate::auth_2fa::TelegramBot::get().map_or(false, |bot| bot.is_some())
+}
+
+pub fn verify_bot(token: String) -> String {
+    match crate::auth_2fa::get_chatid_telegram(&token) {
+        Err(err) => err.to_string(),
+        Ok(None) => {
+            "To activate the bot, simply send a message beginning with a forward slash (\"/\") like \"/hello\" to its chat.".to_owned()
+        }
+        _ => "".to_owned(),
+    }
+}
+
+pub fn check_hwcodec() {
+    #[cfg(feature = "hwcodec")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+
+        ONCE.call_once(|| {
+            if crate::platform::is_installed() {
+                ipc::notify_server_to_check_hwcodec().ok();
+                ipc::client_get_hwcodec_config_thread(3);
+            } else {
+                scrap::hwcodec::start_check_process();
+            }
+        })
     }
 }

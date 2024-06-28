@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[cfg(not(any(target_os = "ios")))]
 use crate::Connection;
@@ -16,6 +20,7 @@ const TIME_CONN: Duration = Duration::from_secs(3);
 #[cfg(not(any(target_os = "ios")))]
 lazy_static::lazy_static! {
     static ref SENDER : Mutex<broadcast::Sender<Vec<i32>>> = Mutex::new(start_hbbs_sync());
+    static ref PRO: Arc<Mutex<bool>> = Default::default();
 }
 
 #[cfg(not(any(target_os = "ios")))]
@@ -46,50 +51,70 @@ pub struct StrategyOptions {
 #[cfg(not(any(target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 async fn start_hbbs_sync_async() {
-    let mut interval = tokio::time::interval_at(Instant::now() + TIME_CONN, TIME_CONN);
+    let mut interval = crate::rustdesk_interval(tokio::time::interval_at(
+        Instant::now() + TIME_CONN,
+        TIME_CONN,
+    ));
     let mut last_sent: Option<Instant> = None;
-    let mut info_uploaded: (bool, String, Option<Instant>) = (false, "".to_owned(), None);
+    let mut info_uploaded: (bool, String, Option<Instant>, String) =
+        (false, "".to_owned(), None, "".to_owned());
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 let url = heartbeat_url();
+                let id = Config::get_id();
                 if url.is_empty() {
+                    *PRO.lock().unwrap() = false;
                     continue;
                 }
-                if !Config::get_option("stop-service").is_empty() {
+                if hbb_common::config::option2bool("stop-service", &Config::get_option("stop-service")) {
                     continue;
                 }
                 let conns = Connection::alive_conns();
-                if info_uploaded.0 && url != info_uploaded.1 {
+                if info_uploaded.0 && (url != info_uploaded.1 || id != info_uploaded.3) {
                     info_uploaded.0 = false;
+                    *PRO.lock().unwrap() = false;
                 }
-                if !info_uploaded.0 && info_uploaded.2.map(|x| x.elapsed() >= UPLOAD_SYSINFO_TIMEOUT).unwrap_or(true){
+                if !info_uploaded.0 && info_uploaded.2.map(|x| x.elapsed() >= UPLOAD_SYSINFO_TIMEOUT).unwrap_or(true) {
                     let mut v = crate::get_sysinfo();
-                    v["version"] = json!(crate::VERSION);
-                    v["id"] = json!(Config::get_id());
-                    v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
-                    match crate::post_request(url.replace("heartbeat", "sysinfo"), v.to_string(), "").await {
-                        Ok(x)  => {
-                            if x == "SYSINFO_UPDATED" {
-                                info_uploaded = (true, url.clone(), None);
-                                hbb_common::log::info!("sysinfo updated");
-                            } else if x == "ID_NOT_FOUND" {
-                                info_uploaded.2 = None; // next heartbeat will upload sysinfo again
-                            } else {
+                    // username is empty in login screen of windows, but here we only upload sysinfo once, causing
+                    // real user name not uploaded after login screen. https://github.com/rustdesk/rustdesk/discussions/8031
+                    if !cfg!(windows) || !v["username"].as_str().unwrap_or_default().is_empty() {
+                        v["version"] = json!(crate::VERSION);
+                        v["id"] = json!(id);
+                        v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
+                        let ab_name = Config::get_option("preset-address-book-name");
+                        if !ab_name.is_empty() {
+                            v["preset-address-book-name"] = json!(ab_name);
+                        }
+                        let ab_tag = Config::get_option("preset-address-book-tag");
+                        if !ab_tag.is_empty() {
+                            v["preset-address-book-tag"] = json!(ab_tag);
+                        }
+                        match crate::post_request(url.replace("heartbeat", "sysinfo"), v.to_string(), "").await {
+                            Ok(x)  => {
+                                if x == "SYSINFO_UPDATED" {
+                                    info_uploaded = (true, url.clone(), None, id.clone());
+                                    hbb_common::log::info!("sysinfo updated");
+                                    *PRO.lock().unwrap() = true;
+                                } else if x == "ID_NOT_FOUND" {
+                                    info_uploaded.2 = None; // next heartbeat will upload sysinfo again
+                                } else {
+                                    info_uploaded.2 = Some(Instant::now());
+                                }
+                            }
+                            _ => {
                                 info_uploaded.2 = Some(Instant::now());
                             }
                         }
-                        _ => {
-                            info_uploaded.2 = Some(Instant::now());
-                        }
                     }
                 }
-                if conns.is_empty() && last_sent.map(|x| x.elapsed() < TIME_HEARTBEAT).unwrap_or(false){
+                if conns.is_empty() && last_sent.map(|x| x.elapsed() < TIME_HEARTBEAT).unwrap_or(false) {
                     continue;
                 }
                 last_sent = Some(Instant::now());
                 let mut v = Value::default();
-                v["id"] = json!(Config::get_id());
+                v["id"] = json!(id);
                 v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
                 v["ver"] = json!(hbb_common::get_version_number(crate::VERSION));
                 if !conns.is_empty() {
@@ -147,4 +172,10 @@ fn handle_config_options(config_options: HashMap<String, String>) {
         })
         .count();
     Config::set_options(options);
+}
+
+#[allow(unused)]
+#[cfg(not(any(target_os = "ios")))]
+pub fn is_pro() -> bool {
+    PRO.lock().unwrap().clone()
 }
