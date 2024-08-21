@@ -636,5 +636,13 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Requires at least {} characters", "Richiede almeno {} caratteri"),
         ("Wrong PIN", "PIN errato"),
         ("Set PIN", "Imposta PIN"),
+        ("Enable trusted devices", "Abilita dispositivi attendibili"),
+        ("Manage trusted devices", "Gestisci dispositivi attendibili"),
+        ("Platform", "Piattaforma"),
+        ("Days remaining", "Giorni rimanenti"),
+        ("enable-trusted-devices-tip", "Salta verifica 2FA nei dispositivi attendibili"),
+        ("Parent directory", "Cartella principale"),
+        ("Resume", "Riprendi"),
+        ("Invalid file name", "Nome file non valido"),
     ].iter().cloned().collect();
 }
