@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -269,6 +270,8 @@ class FfiModel with ChangeNotifier {
       var name = evt['name'];
       if (name == 'msgbox') {
         handleMsgBox(evt, sessionId, peerId);
+      } else if (name == 'toast') {
+        handleToast(evt, sessionId, peerId);
       } else if (name == 'set_multiple_windows_session') {
         handleMultipleWindowsSession(evt, sessionId, peerId);
       } else if (name == 'peer_info') {
@@ -390,6 +393,10 @@ class FfiModel with ChangeNotifier {
         handleFollowCurrentDisplay(evt, sessionId, peerId);
       } else if (name == 'use_texture_render') {
         _handleUseTextureRender(evt, sessionId, peerId);
+      } else if (name == "selected_files") {
+        if (isWeb) {
+          parent.target?.fileModel.onSelectedFiles(evt);
+        }
       } else {
         debugPrint('Event is not handled in the fixed branch: $name');
       }
@@ -588,6 +595,37 @@ class FfiModel with ChangeNotifier {
     } else {
       final hasRetry = evt['hasRetry'] == 'true';
       showMsgBox(sessionId, type, title, text, link, hasRetry, dialogManager);
+    }
+  }
+
+  handleToast(Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+    final type = evt['type'] ?? 'info';
+    final text = evt['text'] ?? '';
+    final durMsc = evt['dur_msec'] ?? 2000;
+    final duration = Duration(milliseconds: durMsc);
+    if ((text).isEmpty) {
+      BotToast.showLoading(
+        duration: duration,
+        clickClose: true,
+        allowClick: true,
+      );
+    } else {
+      if (type.contains('error')) {
+        BotToast.showText(
+          contentColor: Colors.red,
+          text: translate(text),
+          duration: duration,
+          clickClose: true,
+          onlyOne: true,
+        );
+      } else {
+        BotToast.showText(
+          text: translate(text),
+          duration: duration,
+          clickClose: true,
+          onlyOne: true,
+        );
+      }
     }
   }
 
