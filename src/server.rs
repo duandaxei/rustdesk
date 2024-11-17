@@ -111,6 +111,8 @@ pub fn new() -> ServerPtr {
                 // wayland does not support multiple displays currently
                 server.add_service(Box::new(input_service::new_window_focus()));
             }
+            #[cfg(not(target_os = "linux"))]
+            server.add_service(Box::new(input_service::new_window_focus()));
         }
     }
     Arc::new(RwLock::new(server))
@@ -498,7 +500,6 @@ pub async fn start_server(is_server: bool, no_server: bool) {
         #[cfg(target_os = "windows")]
         crate::platform::try_kill_broker();
         #[cfg(feature = "hwcodec")]
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         scrap::hwcodec::start_check_process();
         crate::RendezvousMediator::start_all().await;
     } else {
